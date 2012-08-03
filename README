@@ -1,0 +1,19 @@
+This project contains several methods for traffic light
+control. General utilities may be found in the tlutils
+module, while the main files for each method is prefixed
+by "tlcontrol-".
+
+All of the methods will require that the traci package
+be located somewhere on the python path. The suggested
+method on linux is creating a symlink to it on 
+"~/.local/lib/pythonX.Y/site-packages/", where X.Y indicates
+the installed python version.
+
+For more thorough documentation on each of these, check
+python's builtin documentation utilities (e.g. the help
+function and pydoc) and invoke the main files with
+a "--help" option.
+
+In case something goes terribly (or not so terribly)
+wrong, you may find out the author of the files through
+the Version Control System, and contact him.
