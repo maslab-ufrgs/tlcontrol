@@ -23,7 +23,9 @@ that partition [0,1] (e.g. {[0,0.5], (0.5,1]}, {[0,0.2], (0.2,0.5],
 The observed state for an agent is a tuple with the discretized
 state of each group of lanes.
 
-
+The reward is the mean number of halting vehicles on incoming lanes,
+normalized to [-1,2] (but almost always on [-1,1].  The number of
+halting vehicles should be correlated to the queue length.
 """
 
 import optparse
@@ -33,9 +35,6 @@ import traci
 
 from qlearning import EpsilonFirstQTable
 from tlutils import Program, Lane
-
-
-DESCRIPTION = '\n'.join(__doc__.split('\n\n'))
 
 
 def function_of_iterable(fn_of_list):
@@ -91,13 +90,18 @@ class Agent:
     cartesian product of the sets of each lanesets'
     states.
 
-    Each laneset state is the average occupation of its lanes, discretized
-    according to intervals, defined by DISCRETIZATION_LIMITS.
+    Each laneset state is the average occupation of its lanes,
+    discretized according to intervals, defined by DISCRETIZATION_LIMITS.
     e.g. {[0,0.25],(0.25,0.75],(0.75,1.0]} can be obtained
     with DISCRETIZATION_LIMITS = [0.25, 0.75]
 
-    Each state provides four actions to the agent:
-    (increase or decrease) its duration by (5% or 20%) of the original duration
+    Each phase with green lights provides an action to the
+    agent: increasing its duration by 20% of its original duration,
+    decreasing all other phases equally to maintain the cycle length.
+    There is also a "no operation" action, which does nothing.
+
+    The reward is the mean number of halting vehicles on incoming lanes,
+    normalized to [-1,2] (but generally on [-1,1]).
     """
 
     DISCRETIZATION_LIMITS = [0.5]
@@ -123,7 +127,7 @@ class Agent:
         states = cartesian_prod(range(num_intervals) for (i, p) in relevant_phases)
         actions = [(idx, phase.duration * factor)
                    for (idx, phase) in relevant_phases
-                   for factor in (0.05, 0.2, -0.05, -0.2)] + [None]
+                   for factor in [0.2]] + [None]
 
         # Initialize the qtable
         self.__qtable = EpsilonFirstQTable(states, actions, learning_rate,
@@ -151,15 +155,29 @@ class Agent:
         state = self.discretize_state(lanes)
 
         # Update the qtable
-        if self.__last_state is not None and self.__last_action is not None:
+        if self.__last_state is not None:
             reward = self.calculate_reward(lanes)
             self.__qtable.observe(self.__last_state, self.__last_action, state, reward)
 
         # Decide and execute the action
         action = self.__qtable.act(state)
         if action is not None:
-            (idx, increment) = action
-            self.__program.phases[idx].duration += increment
+            (inc_idx, increment) = action
+
+            self.__program.phases[inc_idx].duration += increment
+
+            green_phases = [(idx, p) for idx, p in enumerate(self.__program.phases)
+                            if p.has_green]
+            decr_phases = len(green_phases) - 1
+            decrement = int(increment / decr_phases)
+            for (decr_idx, phase) in green_phases:
+                if decr_idx != inc_idx:
+                    phase.duration -= decrement
+
+            # Compensate errors on float->int conversion
+            error = decr_phases * (increment % decr_phases)
+            self.__program.phases[inc_idx].duration += error
+
             traci.trafficlights.setCompleteRedYellowGreenDefinition(self.tl_id,
                                                                     self.__program)
 
@@ -170,10 +188,12 @@ class Agent:
         """Obtain from SUMO and discretize the occupancies of the lanes."""
         lanes_by_phase = (phase.green_lanes for phase in self.__program.phases
                           if phase.has_green)
-        phase_halts = (arith_mean(lanes[l].normalized_mean_halting_vehicles
-                                  for l in ls)
-                       for ls in lanes_by_phase)
-        return tuple(self.discretize_normalized(o) for o in phase_halts)
+        phase_occupancies = [arith_mean(lanes[l].mean_occupancy
+                                        for l in ls)
+                             for ls in lanes_by_phase]
+        result = tuple(self.discretize_normalized(o) for o in phase_occupancies)
+        return result
+
 
     def discretize_normalized(self, value):
         """Discretized a normalized value in [0,1] according to DISCRETIZATION_LIMITS."""
@@ -186,11 +206,8 @@ class Agent:
     def calculate_reward(self, lanes):
         halts = [lanes[l].normalized_mean_halting_vehicles
                  for l in self.__lanes]
-        m = max(halts)
-        p = self.__reward_expt
 
-        reward = (p * (1 - arith_mean(halts))
-                  + (1 - p) * arith_mean(h / m for h in halts))
+        reward = 1 - arith_mean(halts)
         return (reward**self.__reward_expt * 2) - 1
 
 # Default parameters
@@ -238,11 +255,6 @@ def main():
             for a in agents:
                 a.act(lanes)
 
-        for a in agents:
-            with open(a.tl_id, 'w') as out:
-                for (pair, val) in a.qvalues:
-                    out.write("(%s, %s) %.4f\n" % (pair[0], pair[1], val))
-
         # Request another step
         traci.simulationStep(0)
         curr_step += step_length
@@ -251,11 +263,17 @@ def main():
     traci.close()
 
 
+DESCRIPTION = '\n'.join(__doc__.split('\n\n')[:2]) # First two paragraphs of docstring
+EPILOG = '\n' + '\n\n'.join(__doc__.split('\n\n')[2:]) # Rest of the docstring
+
 def parse_options(args):
     """Parse the command-line options, return (options, args)."""
-    parser = optparse.OptionParser()
+    # Hack to properly print the epilog
+    optparse.OptionParser.format_epilog = lambda self, formatter: self.epilog
 
     # Add all simulation options
+    parser = optparse.OptionParser(description=DESCRIPTION,
+                                   epilog=EPILOG)
     parser.add_option('-e', '--end', type="int", metavar="MILLISECONDS",
                       dest='end', help="End time of the simulation.")
     parser.add_option('-p', '--port', type="int", default=4444, dest='port',
@@ -272,10 +290,10 @@ def parse_options(args):
     parser.add_option('--reward-expt', type='float', dest='reward_expt',
                       default=DEFAULT_REWARD_EXPT, metavar='EXPT',
                       help="Exponent used for calculating the reward of an action "
-                      "[default: %default]. Let Ol be the average occupancy for the "
-                      "lane l in the last period, and OMl be the max occupancy for "
-                      "the lane l. The reward is calculated as the sum for all lanes "
-                      "l of (1-Ol/OMl)^reward_expt.")
+                      "[default: %default]. Let Hl be the number of halting vehicles on "
+                      "lane l in the last period, and Ml be the capacity of the lane l. "
+                      "The reward is calculated as the sum for all lanes l of "
+                      "(1 - Hl/Ml)^reward_expt.")
 
     # Obtain the state discretization limits
     def parse_limits(option, opt_str, value, parser):

@@ -3,6 +3,7 @@
 from collections import deque
 import traci
 
+# Export the utility classes
 __all__ = ['Lane', 'Program', 'Phase']
 
 
@@ -246,6 +247,8 @@ class Phase(object, traci.trafficlights.Phase):
 
     DEFAULT_MIN =  20000
     DEFAULT_MAX = 120000
+    DEFAULT_MIN_NOGREEN = 0
+    DEFAULT_MAX_NOGREEN = 60000
 
     @staticmethod
     def from_sumo(phase, lanes):
@@ -257,9 +260,9 @@ class Phase(object, traci.trafficlights.Phase):
                  min_duration=None, max_duration=None):
         """Initializes a phase from the list of incoming lanes, a state string and the duration values.
 
-        The state string consists of characters from g_gy_yr_r, which refer to the lane
+        The state string consists of characters from gGyYrR, which refer to the lane
         in the same position of controlled_lanes, e.g. controlled_lanes = ["1","2"] and
-        state_string = "r_g" means that the lane "1" is red while lane "2" is green.
+        state_string = "rG" means that the lane "1" is red while lane "2" is green.
 
         Obviously, controlled_lanes and state_string must have the same length,
         otherwise a ValueError is raised.
@@ -272,12 +275,14 @@ class Phase(object, traci.trafficlights.Phase):
 
         self.fill_with(self, controlled_lanes)
 
-        self.__min_duration = min_duration or self.DEFAULT_MIN
-        self.__max_duration = max_duration or self.DEFAULT_MAX
+        self.__min_duration = min_duration or (self.DEFAULT_MIN if self.has_green
+                                               else self.DEFAULT_MIN_NOGREEN)
+        self.__max_duration = max_duration or (self.DEFAULT_MAX if self.has_green
+                                               else self.DEFAULT_MAX_NOGREEN)
 
     @property
     def state(self):
-        """Dict from incoming lane ID to its current state (g_gy_yr_r)."""
+        """Dict from incoming lane ID to its current state (char from gGyYrR)."""
         return self.__state
 
     @property
